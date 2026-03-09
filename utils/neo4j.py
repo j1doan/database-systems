@@ -14,22 +14,22 @@ def _driver():
 
 
 def get_graph_summary():
-    """Count nodes per label in the graph."""
-    cypher = """
-        CALL apoc.meta.stats()
-        YIELD labels
-        RETURN labels
+    """Return node counts grouped by label using a simple Cypher query.
+
+    Returns a list of dicts: [{'labels': [...], 'count': n}, ...]
     """
-    # Simpler version that doesn't require APOC:
-    labels = ['Subject', 'Session', 'Neuron', 'BrainRegion', 'Stimulus']
+    cypher = """
+    MATCH (n)
+    RETURN labels(n) AS labels, count(n) AS count
+    """
     driver = _driver()
-    counts = {}
+    results = []
     with driver.session() as s:
-        for label in labels:
-            result = s.run(f'MATCH (n:{label}) RETURN COUNT(n) AS c')
-            counts[label] = result.single()['c']
+        for record in s.run(cypher):
+            r = record['r']
+            results.append(dict(r))
     driver.close()
-    return counts
+    return results
 
 def get_brain_regions():
     """
