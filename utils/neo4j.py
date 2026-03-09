@@ -43,12 +43,12 @@ def get_brain_regions():
     driver.close()
     return pd.DataFrame(results)
 
-def get_neurons_per_session():
-    """Get neuron count per session."""
+def get_experiment_flow():
+    """Get subject, session, neuron, region in that order."""
     cypher = """
-    MATCH (sess:Session)-[:HAS_NEURON]->(n:Neuron)
-    RETURN sess.session_id AS session_id, count(n) AS n_neurons
-    ORDER BY n_neurons DESC
+    MATCH (s:Subject)-[:HAS_SESSION]->(sess:Session)-[:HAS_NEURON]->(n:Neuron)-[:LOCATED_IN]->(r:BrainRegion)
+    RETURN s, sess, n, r
+    LIMIT 100;
     """
     driver = _driver()
     results = []
