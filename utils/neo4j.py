@@ -14,46 +14,79 @@ def _driver():
 
 
 def get_graph_summary():
-    """Count nodes per label in the graph."""
+    """Return node counts grouped by label using a simple Cypher query."""
     cypher = """
-        CALL apoc.meta.stats()
-        YIELD labels
-        RETURN labels
-    """
-    # Simpler version that doesn't require APOC:
-    labels = ['Subject', 'Session', 'Neuron', 'BrainRegion', 'Stimulus']
-    driver = _driver()
-    counts = {}
-    with driver.session() as s:
-        for label in labels:
-            result = s.run(f'MATCH (n:{label}) RETURN COUNT(n) AS c')
-            counts[label] = result.single()['c']
-    driver.close()
-    return counts
-
-def get_neuron_path(neuron_db_id):
-    """
-    Return the full path: Subject -> Session -> Neuron -> BrainRegion
-    for a given neuron's database ID (the SERIAL id from PostgreSQL).
-    """
-    cypher = """
-        MATCH path =
-            (su:Subject)-[:HAS_SESSION]->(se:Session)
-                        -[:HAS_NEURON]->(n:Neuron {db_id: $db_id})
-                        -[:LOCATED_IN]->(br:BrainRegion)
-        RETURN
-            su.subject_id  AS subject,
-            se.session_id  AS session,
-            n.db_id        AS neuron_db_id,
-            n.unit_index   AS unit_index,
-            n.n_spikes     AS n_spikes,
-            n.mean_firing_rate AS mean_firing_rate,
-            br.name        AS brain_region
+    MATCH (n)
+    RETURN labels(n) AS labels, count(n) AS count
+    ORDER BY count DESC
     """
     driver = _driver()
     results = []
     with driver.session() as s:
-        for record in s.run(cypher, db_id=neuron_db_id):
-            results.append(dict(record))
+        for record in s.run(cypher):
+            results.append(record.data())
     driver.close()
-    return results
+    return pd.DataFrame(results)
+
+def get_brain_regions():
+    """Get all brain regions with their neuron counts."""
+    cypher = """
+    MATCH (br:BrainRegion)<-[:LOCATED_IN]-(n:Neuron)
+    RETURN br.name AS brain_region, count(n) AS n_neurons
+    ORDER BY n_neurons DESC
+    """
+    driver = _driver()
+    results = []
+    with driver.session() as s:
+        for record in s.run(cypher):
+            results.append(record.data())
+    driver.close()
+    return pd.DataFrame(results)
+
+def get_experiment_flow():
+    """Get subject, session, neuron, region in that order."""
+    cypher = """
+    MATCH (s:Subject)-[:HAS_SESSION]->(sess:Session)-[:HAS_NEURON]->(n:Neuron)-[:LOCATED_IN]->(r:BrainRegion)
+    RETURN s, sess, n, r
+    LIMIT 100;
+    """
+    driver = _driver()
+    results = []
+    with driver.session() as s:
+        for record in s.run(cypher):
+            results.append(record.data())
+    driver.close()
+    return pd.DataFrame(results)
+
+def get_neuron_clusters():
+    """Get neuron clusters within sessions and which brain regions those sessions were targeted simultaneously.
+    """
+    cypher = """
+    MATCH (sess:Session)-[:HAS_NEURON]->(n:Neuron)-[:LOCATED_IN]->(r:BrainRegion)
+    RETURN sess, n, r
+    LIMIT 100;
+    """
+    driver = _driver()
+    results = []
+    with driver.session() as s:
+        for record in s.run(cypher):
+            results.append(record.data())
+    driver.close()
+    return pd.DataFrame(results)
+
+def get_multi_region_sessions():
+    """Get sessions that experimented on multiple brain regions."""
+    cypher = """
+    MATCH (sess:Session)-[:HAS_NEURON]->(n:Neuron)-[:LOCATED_IN]->(r:BrainRegion)
+    WITH sess, collect(distinct r.name) AS regions, count(n) AS unitCount
+    WHERE size(regions) > 1
+    RETURN sess.session_id, regions, unitCount
+    ORDER BY unitCount DESC;
+    """
+    driver = _driver()
+    results = []
+    with driver.session() as s:
+        for record in s.run(cypher):
+            results.append(record.data())
+    driver.close()
+    return pd.DataFrame(results)
