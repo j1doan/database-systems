@@ -31,29 +31,19 @@ def get_graph_summary():
     driver.close()
     return counts
 
-def get_neuron_path(neuron_db_id):
+def get_brain_regions():
     """
-    Return the full path: Subject -> Session -> Neuron -> BrainRegion
-    for a given neuron's database ID (the SERIAL id from PostgreSQL).
+    Get all brain regions as a list of dicts.
     """
     cypher = """
-        MATCH path =
-            (su:Subject)-[:HAS_SESSION]->(se:Session)
-                        -[:HAS_NEURON]->(n:Neuron {db_id: $db_id})
-                        -[:LOCATED_IN]->(br:BrainRegion)
-        RETURN
-            su.subject_id  AS subject,
-            se.session_id  AS session,
-            n.db_id        AS neuron_db_id,
-            n.unit_index   AS unit_index,
-            n.n_spikes     AS n_spikes,
-            n.mean_firing_rate AS mean_firing_rate,
-            br.name        AS brain_region
+    MATCH (r:BrainRegion)
+    RETURN r
     """
     driver = _driver()
     results = []
     with driver.session() as s:
-        for record in s.run(cypher, db_id=neuron_db_id):
-            results.append(dict(record))
+        for record in s.run(cypher):
+            r = record['r']
+            results.append(dict(r))
     driver.close()
     return results
