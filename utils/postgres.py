@@ -41,12 +41,48 @@ def firing_stats(brain_region=None):
     """
     Firing statistics for ALL regions ALL sessions
     """
-    # TODO
-    pass
+    sql = """
+        SELECT
+            brain_region,
+            COUNT(*) AS n_neurons,
+            AVG(mean_firing_rate) AS avg_firing_rate,
+            MIN(mean_firing_rate) AS min_firing_rate,
+            MAX(mean_firing_rate) AS max_firing_rate
+        FROM neurons
+    """
+    params = []
+
+    if brain_region is not None:
+        sql += " WHERE brain_region = %s"
+        params.append(brain_region)
+
+    sql += " GROUP BY brain_region ORDER BY brain_region"
+
+    conn = _connect()
+    try:
+        return pd.read_sql(sql, conn, params=params)
+    finally:
+        conn.close()
 
 def firing_stats_hippocampus():
     """
     Firing stats only for Hippocampus neurons
     """
-    # TODO
-    pass
+    sql = """
+        SELECT
+            brain_region,
+            COUNT(*) AS n_neurons,
+            AVG(mean_firing_rate) AS avg_firing_rate,
+            MIN(mean_firing_rate) AS min_firing_rate,
+            MAX(mean_firing_rate) AS max_firing_rate
+        FROM neurons
+        WHERE brain_region ILIKE %s
+        GROUP BY brain_region
+        ORDER BY brain_region
+    """
+
+    conn = _connect()
+    try:
+        return pd.read_sql(sql, conn, params=['%Hippocampus%'])
+    finally:
+        conn.close()
