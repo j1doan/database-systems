@@ -1,27 +1,42 @@
 """
-Download one NWB session from DANDI 000004 and load into PostgreSQL + Neo4j.
-File is cached in data/ so subsequent runs are instant.
+Stream every NWB session from DANDI 000004 directly into PostgreSQL + Neo4j.
+No files are written to disk — HDF5 data is fetched on-demand via HTTP range
+requests using remfile, so only the bytes that are actually needed are transferred.
+Sessions already present in the DB are skipped.
 """
-import os
 import numpy as np
 import psycopg
-from pynwb import read_nwb
-from dandi.download import download
+import h5py
+import remfile
+from pynwb import NWBHDF5IO
+from dandi.dandiapi import DandiAPIClient
 from neo4j import GraphDatabase
 import config
 
-# asset download hardcode link from dandiset 000004 (~72 MB) via DANDI API
-# change this to download another session
-NWB_URL  = 'https://api.dandiarchive.org/api/assets/0f57f0b0-f021-42bb-8eaa-56cd482e2a29/download/'
-NWB_PATH = 'data/sub-P11HMH_ses-20061101_ecephys+image.nwb'
+DANDISET_ID = '000004'
 
-def open_nwb():
-    if not os.path.exists(NWB_PATH):
-        print("Downloading NWB file (~72 MB) ...")
-        download(NWB_URL, "data/")
-    return read_nwb(NWB_PATH)
 
-def ingest_postgres(nwb):
+def _open_stream(asset):
+    """Return (NWBHDF5IO, NWBFile) for a DANDI asset — no local file created."""
+    s3_url = asset.get_content_url(follow_redirects=1, strip_query=True)
+    byte_stream = remfile.File(s3_url)
+    h5_file = h5py.File(byte_stream, 'r')
+    io = NWBHDF5IO(file=h5_file, load_namespaces=True)
+    return io, io.read()
+
+
+def discover_sessions(dandiset_id=DANDISET_ID):
+    """Print all NWB assets available in a DANDI dandiset."""
+    with DandiAPIClient() as client:
+        assets = [a for a in client.get_dandiset(dandiset_id).get_assets()
+                  if a.path.endswith('.nwb')]
+    print(f'Dandiset {dandiset_id} — {len(assets)} NWB assets:\n')
+    for a in assets:
+        print(f'  {a.path}')
+    return assets
+
+
+def ingest_postgres(nwb, asset_path):
     session_id = nwb.identifier
     subject_id = str(nwb.subject.subject_id)
     units_df = nwb.units.to_dataframe()
@@ -35,6 +50,16 @@ def ingest_postgres(nwb):
     }
 
     with psycopg.connect(config.PG_DSN) as conn, conn.cursor() as cur:
+        # idempotent — skip if this session's neurons are already present
+        cur.execute('SELECT COUNT(*) FROM neurons WHERE session_id = %s', (session_id,))
+        if cur.fetchone()[0] > 0:
+            print(f'[Postgres] {session_id} already ingested — skipping.')
+            cur.execute(
+                'SELECT unit_index, neuron_id FROM neurons WHERE session_id = %s ORDER BY unit_index',
+                (session_id,))
+            neuron_ids = {r[0]: r[1] for r in cur.fetchall()}
+            return neuron_ids, session_id, subject_id, regions
+
         cur.execute(
             'INSERT INTO subjects (subject_id, age, sex, species, institution) '
             'VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
@@ -42,9 +67,9 @@ def ingest_postgres(nwb):
              nwb.subject.species, nwb.institution))
 
         cur.execute(
-            'INSERT INTO sessions (session_id, subject_id, session_date) '
-            'VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
-            (session_id, subject_id, nwb.session_start_time))
+            'INSERT INTO sessions (session_id, subject_id, session_date, nwb_asset_path) '
+            'VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+            (session_id, subject_id, nwb.session_start_time, asset_path))
 
         neuron_ids = {}
         for i in range(len(nwb.units)):
@@ -81,13 +106,17 @@ def ingest_postgres(nwb):
         conn.commit()
 
     n_trials = len(trials_df) if trials_df is not None else 0
-    print(f'[Postgres] {len(neuron_ids)} neurons, {n_trials} trials.')
+    print(f'[Postgres] Ingested {session_id}: {len(neuron_ids)} neurons, {n_trials} trials.')
     return neuron_ids, session_id, subject_id, regions
+
 
 def ingest_neo4j(nwb, neuron_ids, session_id, subject_id, regions):
     driver = GraphDatabase.driver(config.NEO4J_URI, auth=(config.NEO4J_USER, config.NEO4J_PASS))
     with driver.session() as s:
-        s.run('MATCH (n) DETACH DELETE n')  # clear for idempotent re-runs
+        # idempotent: remove only this session's nodes, preserving all other sessions
+        s.run('MATCH (se:Session {session_id:$sess})-[:HAS_NEURON]->(n:Neuron) DETACH DELETE n',
+              sess=session_id)
+        s.run('MATCH (se:Session {session_id:$sess}) DETACH DELETE se', sess=session_id)
         s.run('MERGE (su:Subject {subject_id:$id})', id=subject_id)
         s.run('MERGE (se:Session {session_id:$id}) SET se.date=$dt',
               id=session_id, dt=str(nwb.session_start_time))
@@ -106,11 +135,32 @@ def ingest_neo4j(nwb, neuron_ids, session_id, subject_id, regions):
                   'MERGE (n)-[:LOCATED_IN]->(br)', id=db_id, r=regions[i])
 
     driver.close()
-    print(f'[Neo4j] {len(neuron_ids)} neurons.')
+    print(f'[Neo4j]   Ingested {session_id}: {len(neuron_ids)} neurons.')
+
 
 if __name__ == '__main__':
-    nwb = open_nwb()
-    print(f'Session: {nwb.identifier}')
-    neuron_ids, session_id, subject_id, regions = ingest_postgres(nwb)
-    ingest_neo4j(nwb, neuron_ids, session_id, subject_id, regions)
-    nwb.get_read_io().close()
+    # Pre-fetch already-ingested asset paths so we can skip without opening a stream
+    with psycopg.connect(config.PG_DSN) as conn, conn.cursor() as cur:
+        cur.execute('SELECT nwb_asset_path FROM sessions WHERE nwb_asset_path IS NOT NULL')
+        done_paths = {r[0] for r in cur.fetchall()}
+
+    with DandiAPIClient() as client:
+        assets = [a for a in client.get_dandiset(DANDISET_ID).get_assets()
+                  if a.path.endswith('.nwb')]
+
+    print(f'Dandiset {DANDISET_ID}: {len(assets)} NWB assets found, '
+          f'{len(done_paths)} already ingested.\n')
+
+    for asset in assets:
+        if asset.path in done_paths:
+            print(f'[skip] {asset.path}')
+            continue
+
+        print(f'\n--- {asset.path} ---')
+        io, nwb = _open_stream(asset)
+        try:
+            print(f'Session: {nwb.identifier}')
+            neuron_ids, session_id, subject_id, regions = ingest_postgres(nwb, asset.path)
+            ingest_neo4j(nwb, neuron_ids, session_id, subject_id, regions)
+        finally:
+            io.close()
