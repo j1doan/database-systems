@@ -44,24 +44,24 @@ def region_firing_summary():
     Region-level firing summary across all sessions.
     """
     sql = """
-        WITH region_base AS (
+            WITH region_base AS (
+                SELECT
+                    brain_region,
+                    session_id,
+                    neuron_id,
+                    mean_firing_rate
+                FROM neurons
+            )
             SELECT
                 brain_region,
-                session_id,
-                neuron_id,
-                mean_firing_rate
-            FROM neurons
-        )
-        SELECT
-            brain_region,
-            COUNT(*) AS n_neurons,
-            COUNT(DISTINCT session_id) AS n_sessions,
-            ROUND(AVG(mean_firing_rate)::numeric, 4) AS avg_firing_rate,
-            ROUND(MIN(mean_firing_rate)::numeric, 4) AS min_firing_rate,
-            ROUND(MAX(mean_firing_rate)::numeric, 4) AS max_firing_rate
-        FROM region_base
-        GROUP BY brain_region
-        ORDER BY brain_region
+                COUNT(*) AS n_neurons,
+                COUNT(DISTINCT session_id) AS n_sessions,
+                ROUND(AVG(mean_firing_rate)::numeric, 4) AS avg_firing_rate,
+                ROUND(MIN(mean_firing_rate)::numeric, 4) AS min_firing_rate,
+                ROUND(MAX(mean_firing_rate)::numeric, 4) AS max_firing_rate
+            FROM region_base
+            GROUP BY brain_region
+            ORDER BY avg_firing_rate DESC, max_firing_rate DESC, min_firing_rate DESC;
     """
     conn = _connect()
     try:
